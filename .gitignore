@@ -1,0 +1,7 @@
+# 运行时/本地件
+.venv/
+__pycache__/
+*.pyc
+apps/          # 用户自备的 IPA/APK 素材，不进仓库
+*.log
+nohup.out
