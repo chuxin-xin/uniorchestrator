@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>UniOrchestrator 面板</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--fg:#e6edf3;--dim:#8b949e;--acc:#2f81f0;--ok:#3fb950;--warn:#d29922;--err:#f85149}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 ui-monospace,monospace;background:var(--bg);color:var(--fg)}
+header{padding:12px 16px;background:var(--card);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+header h1{font-size:16px;margin:0 12px 0 0}
+.badge{padding:2px 8px;border-radius:10px;background:#21262d;color:var(--dim);font-size:12px}
+.badge.stable{color:var(--ok)}.badge.experimental{color:var(--warn)}
+main{display:grid;grid-template-columns:340px 1fr;gap:12px;padding:12px}
+.card{background:var(--card);border-radius:8px;padding:12px;margin-bottom:12px}
+.card h2{font-size:13px;color:var(--dim);margin:0 0 8px;text-transform:uppercase;letter-spacing:.05em}
+label{display:block;margin:6px 0 2px;color:var(--dim);font-size:12px}
+input,select,textarea{width:100%;background:#0d1117;border:1px solid #30363d;color:var(--fg);border-radius:6px;padding:6px 8px;font:inherit}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 14px;font:inherit;cursor:pointer;margin-top:8px}
+button.ghost{background:#21262d;color:var(--fg)}button.danger{background:var(--err)}
+table{width:100%;border-collapse:collapse}td,th{padding:6px 8px;border-bottom:1px solid #21262d;text-align:left}
+th{color:var(--dim);font-size:12px}
+.st-running{color:var(--ok)}.st-failed,.st-missing_binary{color:var(--err)}.st-stopped{color:var(--dim)}.st-created{color:var(--warn)}
+#frame{width:220px;height:352px;background:#000;border-radius:6px;object-fit:contain;display:block;margin:8px auto}
+#logpre{background:#0d1117;border-radius:6px;padding:8px;height:180px;overflow:auto;font-size:12px}
+#logpre .error{color:var(--err)}#logpre .warn{color:var(--warn)}
+.row{display:flex;gap:8px}.row>*{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>UniOrchestrator</h1>
+  <span id="plugins" class="badge">plugins…</span>
+  <span class="badge">v0.1 原型 · stable 仅 Linux</span>
+</header>
+<main>
+<section>
+  <div class="card">
+    <h2>启动实例</h2>
+    <label>运行时</label>
+    <select id="f-runtime"><option value="mock">mock（演示）</option><option value="android">android（waydroid 托管）</option></select>
+    <label>名称</label><input id="f-name" value="demo">
+    <label>应用（apps/ 内相对路径，可空）</label><input id="f-app" placeholder="例如 demo.ipa">
+    <label>extra（JSON，白名单过滤）</label><textarea id="f-extra" rows="2">{}</textarea>
+    <label>朝向</label>
+    <select id="f-ori"><option value="portrait">portrait</option><option value="landscape">landscape</option><option value="upside-down">upside-down</option></select>
+    <button onclick="doStart()">启动</button>
+  </div>
+  <div class="card">
+    <h2>实例表</h2>
+    <table><thead><tr><th>id</th><th>状态</th><th></th></tr></thead>
+    <tbody id="inst"></tbody></table>
+  </div>
+  <div class="card">
+    <h2>输入测试（运行中实例）</h2>
+    <div class="row"><input id="in-x" value="160" placeholder="x"><input id="in-y" value="240" placeholder="y"></div>
+    <button class="ghost" onclick="doTap()">发送 tap → 选中实例</button>
+  </div>
+</section>
+<section>
+  <div class="card">
+    <h2>画面（选中实例）</h2>
+    <img id="frame" alt="无画面（v0.1 合成/原生窗口）">
+    <div id="frame-note" style="color:var(--dim);font-size:12px;text-align:center">mock = 合成 1px 帧演示管线；真实画面抓取 = roadmap</div>
+  </div>
+  <div class="card">
+    <h2>日志（选中实例）</h2>
+    <pre id="logpre"></pre>
+  </div>
+</section>
+</main>
+<script>
+let sel=null, ws=null;
+async function j(p,o){return (await fetch(p,o)).json()}
+async function loadPlugins(){
+  const ps=await j('/runtime/plugins');
+  document.getElementById('plugins').textContent='plugins: '+ps.map(p=>p.name+'['+p.channel+']').join(' ');
+  const selEl=document.getElementById('f-runtime');
+  if(ps.some(p=>p.name==='android'))return;
+}
+async function refresh(){
+  const ls=await j('/instance/list');
+  document.getElementById('inst').innerHTML=ls.map(i=>
+    `<tr><td>${i.instance_id} <span class="badge ${i.channel}">${i.runtime}</span></td>
+     <td class="st-${i.status}">${i.status}</td>
+     <td><button class="ghost" onclick="select('${i.instance_id}')">看</button>
+     <button class="danger" onclick="doStop('${i.instance_id}')">停</button></td></tr>`).join('')||'<tr><td colspan=3 style="color:var(--dim)">空</td></tr>';
+}
+function select(iid){
+  sel=iid;
+  if(ws)ws.close();
+  const u=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/instance/'+encodeURIComponent(iid)+'/stream';
+  ws=new WebSocket(u);
+  ws.onmessage=e=>{const m=JSON.parse(e.data);
+    if(m.frame)document.getElementById('frame').src='data:image/jpeg;base64,'+m.frame;};
+  pollLogs();
+}
+async function pollLogs(){
+  if(!sel)return;
+  const ls=await j('/instance/'+encodeURIComponent(sel)+'/logs?n=60');
+  document.getElementById('logpre').innerHTML=ls.map(l=>`<span class="${l.level}">[${l.source}] ${l.msg}</span>`).join('\n');
+  setTimeout(pollLogs,1500);
+}
+async function doStart(){
+  const body={runtime:document.getElementById('f-runtime').value,
+    name:document.getElementById('f-name').value||'demo',
+    app:document.getElementById('f-app').value,
+    extra:JSON.parse(document.getElementById('f-extra').value||'{}'),
+    window:{orientation:document.getElementById('f-ori').value}};
+  const r=await j('/instance/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  sel=r.instance_id;refresh();setTimeout(()=>{if(sel===r.instance_id)select(sel)},300);
+}
+async function doStop(iid){await j('/instance/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance_id:iid})});refresh()}
+async function doTap(){if(!sel)return;
+  const r=await j('/instance/'+encodeURIComponent(sel)+'/input',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({kind:'tap',data:{x:+document.getElementById('in-x').value,y:+document.getElementById('in-y').value}})}).catch(e=>({err:e.message}));
+  console.log('input',r)}
+loadPlugins();refresh();setInterval(refresh,2000);
+</script>
+</body>
+</html>
